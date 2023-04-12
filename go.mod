@@ -23,10 +23,10 @@ require (
 	github.com/xtls/reality v0.0.0-20230226072656-f34b4d174342
 	go.starlark.net v0.0.0-20230224151120-c52844e64a10
 	golang.org/x/crypto v0.6.0
-	golang.org/x/net v0.7.0
+	golang.org/x/net v0.8.0
 	golang.org/x/sync v0.1.0
 	golang.org/x/sys v0.7.0
-	google.golang.org/grpc v1.53.0
+	google.golang.org/grpc v1.54.0
 	google.golang.org/protobuf v1.28.2-0.20230118093459-a9481185b34d
 	gvisor.dev/gvisor v0.0.0-20230225220858-8184fa1db0fa
 	h12.io/socks v1.0.3
@@ -50,7 +50,7 @@ require (
 	go.uber.org/atomic v1.10.0 // indirect
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2 // indirect
 	golang.org/x/mod v0.8.0 // indirect
-	golang.org/x/text v0.7.0 // indirect
+	golang.org/x/text v0.8.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	golang.org/x/tools v0.6.0 // indirect
 	google.golang.org/genproto v0.0.0-20230223222841-637eb2293923 // indirect
