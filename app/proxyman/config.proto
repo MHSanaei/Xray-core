@@ -97,7 +97,5 @@ message MultiplexingConfig {
   // Whether or not Mux is enabled.
   bool enabled = 1;
   // Max number of concurrent connections that one Mux connection can handle.
-  int32 concurrency = 2;
-  // Transport XUDP in another Mux.
-  int32 xudpConcurrency = 3;
+  uint32 concurrency = 2;
 }

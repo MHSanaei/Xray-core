@@ -6,11 +6,12 @@ import (
 	"runtime"
 	"time"
 
-	shadowsocks "github.com/sagernet/sing-shadowsocks"
+	"github.com/sagernet/sing-shadowsocks"
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
 	C "github.com/sagernet/sing/common"
 	B "github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/uot"
 	"github.com/xtls/xray-core/common"
@@ -28,10 +29,10 @@ func init() {
 }
 
 type Outbound struct {
-	ctx       context.Context
-	server    net.Destination
-	method    shadowsocks.Method
-	uotClient *uot.Client
+	ctx    context.Context
+	server net.Destination
+	method shadowsocks.Method
+	uot    bool
 }
 
 func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
@@ -42,21 +43,19 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
 			Port:    net.Port(config.Port),
 			Network: net.Network_TCP,
 		},
+		uot: config.UdpOverTcp,
 	}
 	if C.Contains(shadowaead_2022.List, config.Method) {
 		if config.Key == "" {
 			return nil, newError("missing psk")
 		}
-		method, err := shadowaead_2022.NewWithPassword(config.Method, config.Key, nil)
+		method, err := shadowaead_2022.NewWithPassword(config.Method, config.Key)
 		if err != nil {
 			return nil, newError("create method").Base(err)
 		}
 		o.method = method
 	} else {
 		return nil, newError("unknown method ", config.Method)
-	}
-	if config.UdpOverTcp {
-		o.uotClient = &uot.Client{Version: uint8(config.UdpOverTcpVersion)}
 	}
 	return o, nil
 }
@@ -78,7 +77,7 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	newError("tunneling request to ", destination, " via ", o.server.NetAddr()).WriteToLog(session.ExportIDToError(ctx))
 
 	serverDestination := o.server
-	if o.uotClient != nil {
+	if o.uot {
 		serverDestination.Network = net.Network_TCP
 	} else {
 		serverDestination.Network = network
@@ -86,10 +85,6 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 	connection, err := dialer.Dial(ctx, serverDestination)
 	if err != nil {
 		return newError("failed to connect to server").Base(err)
-	}
-
-	if session.TimeoutOnlyFromContext(ctx) {
-		ctx, _ = context.WithCancel(context.Background())
 	}
 
 	if network == net.Network_TCP {
@@ -154,12 +149,9 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 			}
 		}
 
-		if o.uotClient != nil {
-			uConn, err := o.uotClient.DialEarlyConn(o.method.DialEarlyConn(connection, uot.RequestDestination(o.uotClient.Version)), false, toSocksaddr(destination))
-			if err != nil {
-				return err
-			}
-			return returnError(bufio.CopyPacketConn(ctx, packetConn, uConn))
+		if o.uot {
+			serverConn := o.method.DialEarlyConn(connection, M.Socksaddr{Fqdn: uot.UOTMagicAddress})
+			return returnError(bufio.CopyPacketConn(ctx, packetConn, uot.NewClientConn(serverConn)))
 		} else {
 			serverConn := o.method.DialPacketConn(connection)
 			return returnError(bufio.CopyPacketConn(ctx, packetConn, serverConn))

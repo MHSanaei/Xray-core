@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"math/big"
 	"runtime"
@@ -23,6 +24,7 @@ import (
 	"github.com/xtls/xray-core/proxy/vless"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
+	"github.com/xtls/xray-core/transport/internet/xtls"
 )
 
 const (
@@ -34,23 +36,6 @@ var (
 	tlsClientHandShakeStart = []byte{0x16, 0x03}
 	tlsServerHandShakeStart = []byte{0x16, 0x03, 0x03}
 	tlsApplicationDataStart = []byte{0x17, 0x03, 0x03}
-
-	Tls13CipherSuiteDic = map[uint16]string{
-		0x1301: "TLS_AES_128_GCM_SHA256",
-		0x1302: "TLS_AES_256_GCM_SHA384",
-		0x1303: "TLS_CHACHA20_POLY1305_SHA256",
-		0x1304: "TLS_AES_128_CCM_SHA256",
-		0x1305: "TLS_AES_128_CCM_8_SHA256",
-	}
-)
-
-const (
-	tlsHandshakeTypeClientHello byte = 0x01
-	tlsHandshakeTypeServerHello byte = 0x02
-
-	CommandPaddingContinue byte = 0x00
-	CommandPaddingEnd      byte = 0x01
-	CommandPaddingDirect   byte = 0x02
 )
 
 var addrParser = protocol.NewAddressParser(
@@ -204,6 +189,65 @@ func DecodeResponseHeader(reader io.Reader, request *protocol.RequestHeader) (*A
 	return responseAddons, nil
 }
 
+func ReadV(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater, conn *xtls.Conn, rawConn syscall.RawConn, counter stats.Counter, ctx context.Context) error {
+	err := func() error {
+		var ct stats.Counter
+		for {
+			if conn.DirectIn {
+				conn.DirectIn = false
+				if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Conn != nil {
+					iConn := inbound.Conn
+					statConn, ok := iConn.(*stat.CounterConnection)
+					if ok {
+						iConn = statConn.Connection
+					}
+					if xc, ok := iConn.(*xtls.Conn); ok {
+						iConn = xc.NetConn()
+					}
+					if tc, ok := iConn.(*net.TCPConn); ok {
+						if conn.SHOW {
+							fmt.Println(conn.MARK, "Splice")
+						}
+						runtime.Gosched() // necessary
+						w, err := tc.ReadFrom(conn.NetConn())
+						if counter != nil {
+							counter.Add(w)
+						}
+						if statConn != nil && statConn.WriteCounter != nil {
+							statConn.WriteCounter.Add(w)
+						}
+						return err
+					} else {
+						panic("XTLS Splice: not TCP inbound")
+					}
+				}
+				reader = buf.NewReadVReader(conn.NetConn(), rawConn, nil)
+				ct = counter
+				if conn.SHOW {
+					fmt.Println(conn.MARK, "ReadV")
+				}
+			}
+			buffer, err := reader.ReadMultiBuffer()
+			if !buffer.IsEmpty() {
+				if ct != nil {
+					ct.Add(int64(buffer.Len()))
+				}
+				timer.Update()
+				if werr := writer.WriteMultiBuffer(buffer); werr != nil {
+					return werr
+				}
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}()
+	if err != nil && errors.Cause(err) != io.EOF {
+		return err
+	}
+	return nil
+}
+
 // XtlsRead filter and read xtls protocol
 func XtlsRead(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater, conn net.Conn, rawConn syscall.RawConn,
 	input *bytes.Reader, rawInput *bytes.Buffer,
@@ -212,7 +256,7 @@ func XtlsRead(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater
 ) error {
 	err := func() error {
 		var ct stats.Counter
-		withinPaddingBuffers := true
+		filterUUID := true
 		shouldSwitchToDirectCopy := false
 		var remainingContent int32 = -1
 		var remainingPadding int32 = -1
@@ -250,15 +294,13 @@ func XtlsRead(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater
 			}
 			buffer, err := reader.ReadMultiBuffer()
 			if !buffer.IsEmpty() {
-				if withinPaddingBuffers || *numberOfPacketToFilter > 0 {
+				if filterUUID && (*isTLS || *numberOfPacketToFilter > 0) {
 					buffer = XtlsUnpadding(ctx, buffer, userUUID, &remainingContent, &remainingPadding, &currentCommand)
 					if remainingContent == 0 && remainingPadding == 0 {
 						if currentCommand == 1 {
-							withinPaddingBuffers = false
-							remainingContent = -1
-							remainingPadding = -1 // set to initial state to parse the next padding
+							filterUUID = false
 						} else if currentCommand == 2 {
-							withinPaddingBuffers = false
+							filterUUID = false
 							shouldSwitchToDirectCopy = true
 							// XTLS Vision processes struct TLS Conn's input and rawInput
 							if inputBuffer, err := buf.ReadFrom(input); err == nil {
@@ -271,15 +313,9 @@ func XtlsRead(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater
 									buffer, _ = buf.MergeMulti(buffer, rawInputBuffer)
 								}
 							}
-						} else if currentCommand == 0 {
-							withinPaddingBuffers = true
-						} else {
+						} else if currentCommand != 0 {
 							newError("XtlsRead unknown command ", currentCommand, buffer.Len()).WriteToLog(session.ExportIDToError(ctx))
 						}
-					} else if remainingContent > 0 || remainingPadding > 0 {
-						withinPaddingBuffers = true
-					} else {
-						withinPaddingBuffers = false
 					}
 				}
 				if *numberOfPacketToFilter > 0 {
@@ -306,12 +342,12 @@ func XtlsRead(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater
 
 // XtlsWrite filter and write xtls protocol
 func XtlsWrite(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdater, conn net.Conn, counter stats.Counter,
-	ctx context.Context, numberOfPacketToFilter *int, enableXtls *bool, isTLS12orAbove *bool, isTLS *bool,
+	ctx context.Context, userUUID *[]byte, numberOfPacketToFilter *int, enableXtls *bool, isTLS12orAbove *bool, isTLS *bool,
 	cipher *uint16, remainingServerHello *int32,
 ) error {
 	err := func() error {
 		var ct stats.Counter
-		isPadding := true
+		filterTlsApplicationData := true
 		shouldSwitchToDirectCopy := false
 		for {
 			buffer, err := reader.ReadMultiBuffer()
@@ -319,26 +355,27 @@ func XtlsWrite(reader buf.Reader, writer buf.Writer, timer signal.ActivityUpdate
 				if *numberOfPacketToFilter > 0 {
 					XtlsFilterTls(buffer, numberOfPacketToFilter, enableXtls, isTLS12orAbove, isTLS, cipher, remainingServerHello, ctx)
 				}
-				if isPadding {
+				if filterTlsApplicationData && *isTLS {
 					buffer = ReshapeMultiBuffer(ctx, buffer)
 					var xtlsSpecIndex int
 					for i, b := range buffer {
-						if *isTLS && b.Len() >= 6 && bytes.Equal(tlsApplicationDataStart, b.BytesTo(3)) {
-							var command byte = CommandPaddingEnd
+						if b.Len() >= 6 && bytes.Equal(tlsApplicationDataStart, b.BytesTo(3)) {
+							var command byte = 0x01
 							if *enableXtls {
 								shouldSwitchToDirectCopy = true
 								xtlsSpecIndex = i
-								command = CommandPaddingDirect
+								command = 0x02
 							}
-							isPadding = false
-							buffer[i] = XtlsPadding(b, command, nil, *isTLS, ctx)
+							filterTlsApplicationData = false
+							buffer[i] = XtlsPadding(b, command, userUUID, ctx)
 							break
-						} else if !*isTLS12orAbove && *numberOfPacketToFilter <= 1 { // For compatibility with earlier vision receiver, we finish padding 1 packet early
-							isPadding = false
-							buffer[i] = XtlsPadding(b, CommandPaddingEnd, nil, *isTLS, ctx)
+						} else if !*isTLS12orAbove && *numberOfPacketToFilter <= 0 {
+							// maybe tls 1.1 or 1.0
+							filterTlsApplicationData = false
+							buffer[i] = XtlsPadding(b, 0x01, userUUID, ctx)
 							break
 						}
-						buffer[i] = XtlsPadding(b, CommandPaddingContinue, nil, *isTLS, ctx)
+						buffer[i] = XtlsPadding(b, 0x00, userUUID, ctx)
 					}
 					if shouldSwitchToDirectCopy {
 						encryptBuffer, directBuffer := buf.SplitMulti(buffer, xtlsSpecIndex+1)
@@ -385,7 +422,7 @@ func XtlsFilterTls(buffer buf.MultiBuffer, numberOfPacketToFilter *int, enableXt
 		*numberOfPacketToFilter--
 		if b.Len() >= 6 {
 			startsBytes := b.BytesTo(6)
-			if bytes.Equal(tlsServerHandShakeStart, startsBytes[:3]) && startsBytes[5] == tlsHandshakeTypeServerHello {
+			if bytes.Equal(tlsServerHandShakeStart, startsBytes[:3]) && startsBytes[5] == 0x02 {
 				*remainingServerHello = (int32(startsBytes[3])<<8 | int32(startsBytes[4])) + 5
 				*isTLS12orAbove = true
 				*isTLS = true
@@ -396,7 +433,7 @@ func XtlsFilterTls(buffer buf.MultiBuffer, numberOfPacketToFilter *int, enableXt
 				} else {
 					newError("XtlsFilterTls short server hello, tls 1.2 or older? ", b.Len(), " ", *remainingServerHello).WriteToLog(session.ExportIDToError(ctx))
 				}
-			} else if bytes.Equal(tlsClientHandShakeStart, startsBytes[:2]) && startsBytes[5] == tlsHandshakeTypeClientHello {
+			} else if bytes.Equal(tlsClientHandShakeStart, startsBytes[:2]) && startsBytes[5] == 0x01 {
 				*isTLS = true
 				newError("XtlsFilterTls found tls client hello! ", buffer.Len()).WriteToLog(session.ExportIDToError(ctx))
 			}
@@ -446,7 +483,7 @@ func ReshapeMultiBuffer(ctx context.Context, buffer buf.MultiBuffer) buf.MultiBu
 	for i, buffer1 := range buffer {
 		if buffer1.Len() >= buf.Size-21 {
 			index := int32(bytes.LastIndex(buffer1.Bytes(), tlsApplicationDataStart))
-			if index <= 0 || index > buf.Size-21 {
+			if index <= 0 {
 				index = buf.Size / 2
 			}
 			buffer2 := buf.New()
@@ -466,41 +503,32 @@ func ReshapeMultiBuffer(ctx context.Context, buffer buf.MultiBuffer) buf.MultiBu
 }
 
 // XtlsPadding add padding to eliminate length siganature during tls handshake
-func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, longPadding bool, ctx context.Context) *buf.Buffer {
-	var contentLen int32 = 0
+func XtlsPadding(b *buf.Buffer, command byte, userUUID *[]byte, ctx context.Context) *buf.Buffer {
+	var contantLen int32 = 0
 	var paddingLen int32 = 0
 	if b != nil {
-		contentLen = b.Len()
+		contantLen = b.Len()
 	}
-	if contentLen < 900 && longPadding {
+	if contantLen < 900 {
 		l, err := rand.Int(rand.Reader, big.NewInt(500))
 		if err != nil {
 			newError("failed to generate padding").Base(err).WriteToLog(session.ExportIDToError(ctx))
 		}
-		paddingLen = int32(l.Int64()) + 900 - contentLen
-	} else {
-		l, err := rand.Int(rand.Reader, big.NewInt(256))
-		if err != nil {
-			newError("failed to generate padding").Base(err).WriteToLog(session.ExportIDToError(ctx))
-		}
-		paddingLen = int32(l.Int64())
-	}
-	if paddingLen > buf.Size-21-contentLen {
-		paddingLen = buf.Size - 21 - contentLen
+		paddingLen = int32(l.Int64()) + 900 - contantLen
 	}
 	newbuffer := buf.New()
 	if userUUID != nil {
 		newbuffer.Write(*userUUID)
 		*userUUID = nil
 	}
-	newbuffer.Write([]byte{command, byte(contentLen >> 8), byte(contentLen), byte(paddingLen >> 8), byte(paddingLen)})
+	newbuffer.Write([]byte{command, byte(contantLen >> 8), byte(contantLen), byte(paddingLen >> 8), byte(paddingLen)})
 	if b != nil {
 		newbuffer.Write(b.Bytes())
 		b.Release()
 		b = nil
 	}
 	newbuffer.Extend(paddingLen)
-	newError("XtlsPadding ", contentLen, " ", paddingLen, " ", command).WriteToLog(session.ExportIDToError(ctx))
+	newError("XtlsPadding ", contantLen, " ", paddingLen, " ", command).WriteToLog(session.ExportIDToError(ctx))
 	return newbuffer
 }
 
@@ -515,7 +543,6 @@ func XtlsUnpadding(ctx context.Context, buffer buf.MultiBuffer, userUUID []byte,
 				posByte = 16
 				*remainingContent = 0
 				*remainingPadding = 0
-				*currentCommand = 0
 				break
 			}
 		}
@@ -573,4 +600,12 @@ func XtlsUnpadding(ctx context.Context, buffer buf.MultiBuffer, userUUID []byte,
 	}
 	buf.ReleaseMulti(buffer)
 	return mb2
+}
+
+var Tls13CipherSuiteDic = map[uint16]string{
+	0x1301: "TLS_AES_128_GCM_SHA256",
+	0x1302: "TLS_AES_256_GCM_SHA384",
+	0x1303: "TLS_CHACHA20_POLY1305_SHA256",
+	0x1304: "TLS_AES_128_CCM_SHA256",
+	0x1305: "TLS_AES_128_CCM_8_SHA256",
 }

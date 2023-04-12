@@ -151,19 +151,8 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		newError("failed to clear deadline after handshake").Base(err).WriteToLog(session.ExportIDToError(ctx))
 	}
 
-	var newCtx context.Context
-	var newCancel context.CancelFunc
-	if session.TimeoutOnlyFromContext(ctx) {
-		newCtx, newCancel = context.WithCancel(context.Background())
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, func() {
-		cancel()
-		if newCancel != nil {
-			newCancel()
-		}
-	}, p.Timeouts.ConnectionIdle)
+	timer := signal.CancelAfterInactivity(ctx, cancel, p.Timeouts.ConnectionIdle)
 
 	var requestFunc func() error
 	var responseFunc func() error
@@ -192,10 +181,6 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			reader := &UDPReader{Reader: udpConn}
 			return buf.Copy(reader, link.Writer, buf.UpdateActivity(timer))
 		}
-	}
-
-	if newCtx != nil {
-		ctx = newCtx
 	}
 
 	responseDonePost := task.OnSuccess(responseFunc, task.Close(link.Writer))

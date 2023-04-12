@@ -287,7 +287,6 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	if inbound == nil {
 		panic("no inbound metadata")
 	}
-	inbound.Name = "vmess"
 	inbound.User = request.User
 
 	sessionPolicy = h.policyManager.ForLevel(request.User.Level)

@@ -345,22 +345,19 @@ func TestMuxConfig_Build(t *testing.T) {
 		}},
 		{"empty def", `{}`, &proxyman.MultiplexingConfig{
 			Enabled:     false,
-			Concurrency: 0,
+			Concurrency: 8,
 		}},
 		{"not enable", `{"enabled": false, "concurrency": 4}`, &proxyman.MultiplexingConfig{
 			Enabled:     false,
 			Concurrency: 4,
 		}},
-		{"forbidden", `{"enabled": false, "concurrency": -1}`, &proxyman.MultiplexingConfig{
-			Enabled:     false,
-			Concurrency: -1,
-		}},
+		{"forbidden", `{"enabled": false, "concurrency": -1}`, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := &MuxConfig{}
 			common.Must(json.Unmarshal([]byte(tt.fields), m))
-			if got, _ := m.Build(); !reflect.DeepEqual(got, tt.want) {
+			if got := m.Build(); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("MuxConfig.Build() = %v, want %v", got, tt.want)
 			}
 		})

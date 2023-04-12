@@ -99,7 +99,7 @@ func handle(ctx context.Context, s *Session, output buf.Writer) {
 	}
 
 	writer.Close()
-	s.Close(false)
+	s.Close()
 }
 
 func (w *ServerWorker) ActiveConnections() uint32 {
@@ -131,81 +131,6 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 		}
 		ctx = log.ContextWithAccessMessage(ctx, msg)
 	}
-
-	if network := session.AllowedNetworkFromContext(ctx); network != net.Network_Unknown {
-		if meta.Target.Network != network {
-			return newError("unexpected network ", meta.Target.Network) // it will break the whole Mux connection
-		}
-	}
-
-	if meta.GlobalID != [8]byte{} {
-		mb, err := NewPacketReader(reader, &meta.Target).ReadMultiBuffer()
-		if err != nil {
-			return err
-		}
-		XUDPManager.Lock()
-		x := XUDPManager.Map[meta.GlobalID]
-		if x == nil {
-			x = &XUDP{GlobalID: meta.GlobalID}
-			XUDPManager.Map[meta.GlobalID] = x
-			XUDPManager.Unlock()
-		} else {
-			if x.Status == Initializing { // nearly impossible
-				XUDPManager.Unlock()
-				newError("XUDP hit ", meta.GlobalID).Base(errors.New("conflict")).AtWarning().WriteToLog(session.ExportIDToError(ctx))
-				// It's not a good idea to return an err here, so just let client wait.
-				// Client will receive an End frame after sending a Keep frame.
-				return nil
-			}
-			x.Status = Initializing
-			XUDPManager.Unlock()
-			x.Mux.Close(false) // detach from previous Mux
-			b := buf.New()
-			b.Write(mb[0].Bytes())
-			b.UDP = mb[0].UDP
-			if err = x.Mux.output.WriteMultiBuffer(mb); err != nil {
-				x.Interrupt()
-				mb = buf.MultiBuffer{b}
-			} else {
-				b.Release()
-				mb = nil
-			}
-			newError("XUDP hit ", meta.GlobalID).Base(err).WriteToLog(session.ExportIDToError(ctx))
-		}
-		if mb != nil {
-			ctx = session.ContextWithTimeoutOnly(ctx, true)
-			// Actually, it won't return an error in Xray-core's implementations.
-			link, err := w.dispatcher.Dispatch(ctx, meta.Target)
-			if err != nil {
-				XUDPManager.Lock()
-				delete(XUDPManager.Map, x.GlobalID)
-				XUDPManager.Unlock()
-				err = newError("XUDP new ", meta.GlobalID).Base(errors.New("failed to dispatch request to ", meta.Target).Base(err))
-				return err // it will break the whole Mux connection
-			}
-			link.Writer.WriteMultiBuffer(mb) // it's meaningless to test a new pipe
-			x.Mux = &Session{
-				input:  link.Reader,
-				output: link.Writer,
-			}
-			newError("XUDP new ", meta.GlobalID).Base(err).WriteToLog(session.ExportIDToError(ctx))
-		}
-		x.Mux = &Session{
-			input:        x.Mux.input,
-			output:       x.Mux.output,
-			parent:       w.sessionManager,
-			ID:           meta.SessionID,
-			transferType: protocol.TransferTypePacket,
-			XUDP:         x,
-		}
-		go handle(ctx, x.Mux, w.link.Writer)
-		x.Status = Active
-		if !w.sessionManager.Add(x.Mux) {
-			x.Mux.Close(false)
-		}
-		return nil
-	}
-
 	link, err := w.dispatcher.Dispatch(ctx, meta.Target)
 	if err != nil {
 		if meta.Option.Has(OptionData) {
@@ -232,7 +157,8 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 	rr := s.NewReader(reader, &meta.Target)
 	if err := buf.Copy(rr, s.output); err != nil {
 		buf.Copy(rr, buf.Discard)
-		return s.Close(false)
+		common.Interrupt(s.input)
+		return s.Close()
 	}
 	return nil
 }
@@ -256,8 +182,15 @@ func (w *ServerWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 
 	if err != nil && buf.IsWriteError(err) {
 		newError("failed to write to downstream writer. closing session ", s.ID).Base(err).WriteToLog()
-		s.Close(false)
-		return buf.Copy(rr, buf.Discard)
+
+		// Notify remote peer to close this session.
+		closingWriter := NewResponseWriter(meta.SessionID, w.link.Writer, protocol.TransferTypeStream)
+		closingWriter.Close()
+
+		drainErr := buf.Copy(rr, buf.Discard)
+		common.Interrupt(s.input)
+		s.Close()
+		return drainErr
 	}
 
 	return err
@@ -265,7 +198,12 @@ func (w *ServerWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 
 func (w *ServerWorker) handleStatusEnd(meta *FrameMetadata, reader *buf.BufferedReader) error {
 	if s, found := w.sessionManager.Get(meta.SessionID); found {
-		s.Close(false)
+		if meta.Option.Has(OptionError) {
+			common.Interrupt(s.input)
+			common.Interrupt(s.output)
+		}
+		common.Interrupt(s.input)
+		s.Close()
 	}
 	if meta.Option.Has(OptionData) {
 		return buf.Copy(NewStreamReader(reader), buf.Discard)

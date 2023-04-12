@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	goxtls "github.com/xtls/go"
 	goreality "github.com/xtls/reality"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/net"
@@ -16,6 +17,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/reality"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
+	"github.com/xtls/xray-core/transport/internet/xtls"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,6 +25,7 @@ type Listener struct {
 	addr          *net.UnixAddr
 	ln            net.Listener
 	tlsConfig     *gotls.Config
+	xtlsConfig    *goxtls.Config
 	realityConfig *goreality.Config
 	config        *Config
 	addConn       internet.ConnHandler
@@ -61,6 +64,9 @@ func Listen(ctx context.Context, address net.Address, port net.Port, streamSetti
 	if config := tls.ConfigFromStreamSettings(streamSettings); config != nil {
 		ln.tlsConfig = config.GetTLSConfig()
 	}
+	if config := xtls.ConfigFromStreamSettings(streamSettings); config != nil {
+		ln.xtlsConfig = config.GetXTLSConfig()
+	}
 	if config := reality.ConfigFromStreamSettings(streamSettings); config != nil {
 		ln.realityConfig = config.GetREALITYConfig()
 	}
@@ -94,6 +100,8 @@ func (ln *Listener) run() {
 		go func() {
 			if ln.tlsConfig != nil {
 				conn = tls.Server(conn, ln.tlsConfig)
+			} else if ln.xtlsConfig != nil {
+				conn = xtls.Server(conn, ln.xtlsConfig)
 			} else if ln.realityConfig != nil {
 				if conn, err = reality.Server(conn, ln.realityConfig); err != nil {
 					newError(err).AtInfo().WriteToLog()

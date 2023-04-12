@@ -1,79 +1,30 @@
 package xudp
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"fmt"
 	"io"
-	"os"
-	"strings"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
-	"github.com/xtls/xray-core/common/session"
-	"lukechampine.com/blake3"
 )
 
-var AddrParser = protocol.NewAddressParser(
+var addrParser = protocol.NewAddressParser(
 	protocol.AddressFamilyByte(byte(protocol.AddressTypeIPv4), net.AddressFamilyIPv4),
 	protocol.AddressFamilyByte(byte(protocol.AddressTypeDomain), net.AddressFamilyDomain),
 	protocol.AddressFamilyByte(byte(protocol.AddressTypeIPv6), net.AddressFamilyIPv6),
 	protocol.PortThenAddress(),
 )
 
-var (
-	Show    bool
-	BaseKey []byte
-)
-
-const (
-	EnvShow    = "XRAY_XUDP_SHOW"
-	EnvBaseKey = "XRAY_XUDP_BASEKEY"
-)
-
-func init() {
-	if strings.ToLower(os.Getenv(EnvShow)) == "true" {
-		Show = true
-	}
-	if raw, found := os.LookupEnv(EnvBaseKey); found {
-		if BaseKey, _ = base64.RawURLEncoding.DecodeString(raw); len(BaseKey) == 32 {
-			return
-		}
-		panic(EnvBaseKey + ": invalid value: " + raw)
-	}
-	rand.Read(BaseKey)
-}
-
-func GetGlobalID(ctx context.Context) (globalID [8]byte) {
-	if cone := ctx.Value("cone"); cone == nil || !cone.(bool) { // cone is nil only in some unit tests
-		return
-	}
-	if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Source.Network == net.Network_UDP &&
-		(inbound.Name == "dokodemo-door" || inbound.Name == "socks" || inbound.Name == "shadowsocks") {
-		h := blake3.New(8, BaseKey)
-		h.Write([]byte(inbound.Source.String()))
-		copy(globalID[:], h.Sum(nil))
-		if Show {
-			fmt.Printf("XUDP inbound.Source.String(): %v\tglobalID: %v\n", inbound.Source.String(), globalID)
-		}
-	}
-	return
-}
-
-func NewPacketWriter(writer buf.Writer, dest net.Destination, globalID [8]byte) *PacketWriter {
+func NewPacketWriter(writer buf.Writer, dest net.Destination) *PacketWriter {
 	return &PacketWriter{
-		Writer:   writer,
-		Dest:     dest,
-		GlobalID: globalID,
+		Writer: writer,
+		Dest:   dest,
 	}
 }
 
 type PacketWriter struct {
-	Writer   buf.Writer
-	Dest     net.Destination
-	GlobalID [8]byte
+	Writer buf.Writer
+	Dest   net.Destination
 }
 
 func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
@@ -91,17 +42,14 @@ func (w *PacketWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 			eb.WriteByte(1) // New
 			eb.WriteByte(1) // Opt
 			eb.WriteByte(2) // UDP
-			AddrParser.WriteAddressPort(eb, w.Dest.Address, w.Dest.Port)
-			if b.UDP != nil { // make sure it's user's proxy request
-				eb.Write(w.GlobalID[:])
-			}
+			addrParser.WriteAddressPort(eb, w.Dest.Address, w.Dest.Port)
 			w.Dest.Network = net.Network_Unknown
 		} else {
 			eb.WriteByte(2) // Keep
 			eb.WriteByte(1)
 			if b.UDP != nil {
 				eb.WriteByte(2)
-				AddrParser.WriteAddressPort(eb, b.UDP.Address, b.UDP.Port)
+				addrParser.WriteAddressPort(eb, b.UDP.Address, b.UDP.Port)
 			}
 		}
 		l := eb.Len() - 2
@@ -150,7 +98,7 @@ func (r *PacketReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 		case 2:
 			if l != 4 {
 				b.Advance(5)
-				addr, port, err := AddrParser.ReadAddressPort(nil, b)
+				addr, port, err := addrParser.ReadAddressPort(nil, b)
 				if err != nil {
 					b.Release()
 					return nil, err

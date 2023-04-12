@@ -155,15 +155,14 @@ func buildShadowsocks2022(v *ShadowsocksServerConfig) (proto.Message, error) {
 }
 
 type ShadowsocksServerTarget struct {
-	Address    *Address `json:"address"`
-	Port       uint16   `json:"port"`
-	Cipher     string   `json:"method"`
-	Password   string   `json:"password"`
-	Email      string   `json:"email"`
-	Level      byte     `json:"level"`
-	IVCheck    bool     `json:"ivCheck"`
-	UoT        bool     `json:"uot"`
-	UoTVersion int      `json:"uotVersion"`
+	Address  *Address `json:"address"`
+	Port     uint16   `json:"port"`
+	Cipher   string   `json:"method"`
+	Password string   `json:"password"`
+	Email    string   `json:"email"`
+	Level    byte     `json:"level"`
+	IVCheck  bool     `json:"ivCheck"`
+	UoT      bool     `json:"uot"`
 }
 
 type ShadowsocksClientConfig struct {
@@ -194,7 +193,6 @@ func (v *ShadowsocksClientConfig) Build() (proto.Message, error) {
 			config.Method = server.Cipher
 			config.Key = server.Password
 			config.UdpOverTcp = server.UoT
-			config.UdpOverTcpVersion = uint32(server.UoTVersion)
 			return config, nil
 		}
 	}

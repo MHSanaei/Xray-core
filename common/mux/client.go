@@ -14,7 +14,6 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/common/task"
-	"github.com/xtls/xray-core/common/xudp"
 	"github.com/xtls/xray-core/proxy"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet"
@@ -248,20 +247,22 @@ func fetchInput(ctx context.Context, s *Session, output buf.Writer) {
 		transferType = protocol.TransferTypePacket
 	}
 	s.transferType = transferType
-	writer := NewWriter(s.ID, dest, output, transferType, xudp.GetGlobalID(ctx))
-	defer s.Close(false)
+	writer := NewWriter(s.ID, dest, output, transferType)
+	defer s.Close()
 	defer writer.Close()
 
 	newError("dispatching request to ", dest).WriteToLog(session.ExportIDToError(ctx))
 	if err := writeFirstPayload(s.input, writer); err != nil {
 		newError("failed to write first payload").Base(err).WriteToLog(session.ExportIDToError(ctx))
 		writer.hasError = true
+		common.Interrupt(s.input)
 		return
 	}
 
 	if err := buf.Copy(s.input, writer); err != nil {
 		newError("failed to fetch all input").Base(err).WriteToLog(session.ExportIDToError(ctx))
 		writer.hasError = true
+		common.Interrupt(s.input)
 		return
 	}
 }
@@ -334,8 +335,15 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 	err := buf.Copy(rr, s.output)
 	if err != nil && buf.IsWriteError(err) {
 		newError("failed to write to downstream. closing session ", s.ID).Base(err).WriteToLog()
-		s.Close(false)
-		return buf.Copy(rr, buf.Discard)
+
+		// Notify remote peer to close this session.
+		closingWriter := NewResponseWriter(meta.SessionID, m.link.Writer, protocol.TransferTypeStream)
+		closingWriter.Close()
+
+		drainErr := buf.Copy(rr, buf.Discard)
+		common.Interrupt(s.input)
+		s.Close()
+		return drainErr
 	}
 
 	return err
@@ -343,7 +351,12 @@ func (m *ClientWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.Buffere
 
 func (m *ClientWorker) handleStatusEnd(meta *FrameMetadata, reader *buf.BufferedReader) error {
 	if s, found := m.sessionManager.Get(meta.SessionID); found {
-		s.Close(false)
+		if meta.Option.Has(OptionError) {
+			common.Interrupt(s.input)
+			common.Interrupt(s.output)
+		}
+		common.Interrupt(s.input)
+		s.Close()
 	}
 	if meta.Option.Has(OptionData) {
 		return buf.Copy(NewStreamReader(reader), buf.Discard)

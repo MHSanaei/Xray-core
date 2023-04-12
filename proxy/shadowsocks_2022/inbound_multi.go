@@ -58,7 +58,7 @@ func NewMultiServer(ctx context.Context, config *MultiUserServerConfig) (*MultiU
 	if err != nil {
 		return nil, newError("parse config").Base(err)
 	}
-	service, err := shadowaead_2022.NewMultiService[int](config.Method, psk, 500, inbound, nil)
+	service, err := shadowaead_2022.NewMultiService[int](config.Method, psk, 500, inbound)
 	if err != nil {
 		return nil, newError("create service").Base(err)
 	}
@@ -153,7 +153,6 @@ func (i *MultiUserInbound) Network() []net.Network {
 
 func (i *MultiUserInbound) Process(ctx context.Context, network net.Network, connection stat.Connection, dispatcher routing.Dispatcher) error {
 	inbound := session.InboundFromContext(ctx)
-	inbound.Name = "shadowsocks-2022-multi"
 
 	var metadata M.Metadata
 	if inbound.Source.IsValid() {

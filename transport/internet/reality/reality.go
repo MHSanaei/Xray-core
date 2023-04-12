@@ -107,8 +107,8 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		InsecureSkipVerify:     true,
 		SessionTicketsDisabled: true,
 	}
-	if utlsConfig.ServerName == "" {
-		utlsConfig.ServerName = dest.Address.String()
+	if utlsConfig.ServerName == "" && dest.Address.Family().IsDomain() {
+		utlsConfig.ServerName = dest.Address.Domain()
 	}
 	uConn.ServerName = utlsConfig.ServerName
 	fingerprint := tls.GetFingerprint(config.Fingerprint)
@@ -121,13 +121,13 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		hello := uConn.HandshakeState.Hello
 		hello.SessionId = make([]byte, 32)
 		copy(hello.Raw[39:], hello.SessionId) // the location of session ID
+		binary.BigEndian.PutUint64(hello.SessionId, uint64(time.Now().Unix()))
 		hello.SessionId[0] = core.Version_x
 		hello.SessionId[1] = core.Version_y
 		hello.SessionId[2] = core.Version_z
-		binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 		copy(hello.SessionId[8:], config.ShortId)
 		if config.Show {
-			fmt.Printf("REALITY localAddr: %v\thello.SessionId[:16]: %v\n", localAddr, hello.SessionId[:16])
+			fmt.Printf("REALITY localAddr: %v\thello.sessionId[:16]: %v\n", localAddr, hello.SessionId[:16])
 		}
 		uConn.AuthKey = uConn.HandshakeState.State13.EcdheParams.SharedKey(config.PublicKey)
 		if uConn.AuthKey == nil {
@@ -136,13 +136,14 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 		if _, err := hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20], []byte("REALITY")).Read(uConn.AuthKey); err != nil {
 			return nil, err
 		}
-		if config.Show {
-			fmt.Printf("REALITY localAddr: %v\tuConn.AuthKey[:16]: %v\n", localAddr, uConn.AuthKey[:16])
-		}
 		block, _ := aes.NewCipher(uConn.AuthKey)
 		aead, _ := cipher.NewGCM(block)
 		aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 		copy(hello.Raw[39:], hello.SessionId)
+		if config.Show {
+			fmt.Printf("REALITY localAddr: %v\thello.sessionId: %v\n", localAddr, hello.SessionId)
+			fmt.Printf("REALITY localAddr: %v\tuConn.AuthKey: %v\n", localAddr, uConn.AuthKey)
+		}
 	}
 	if err := uConn.Handshake(); err != nil {
 		return nil, err
@@ -239,10 +240,8 @@ func UClient(c net.Conn, config *Config, ctx context.Context, dest net.Destinati
 	return uConn, nil
 }
 
-var (
-	href = regexp.MustCompile(`href="([/h].*?)"`)
-	dot  = []byte(".")
-)
+var href = regexp.MustCompile(`href="([/h].*?)"`)
+var dot = []byte(".")
 
 var maps struct {
 	sync.Mutex

@@ -2,14 +2,9 @@ package session
 
 import (
 	"context"
-	_ "unsafe"
 
-	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/features/routing"
 )
-
-//go:linkname IndependentCancelCtx context.newCancelCtx
-func IndependentCancelCtx(parent context.Context) context.Context
 
 type sessionKey int
 
@@ -22,8 +17,6 @@ const (
 	sockoptSessionKey
 	trackedConnectionErrorKey
 	dispatcherKey
-	timeoutOnlyKey
-	allowedNetworkKey
 )
 
 // ContextWithID returns a new context with the given ID.
@@ -137,26 +130,4 @@ func DispatcherFromContext(ctx context.Context) routing.Dispatcher {
 		return dispatcher
 	}
 	return nil
-}
-
-func ContextWithTimeoutOnly(ctx context.Context, only bool) context.Context {
-	return context.WithValue(ctx, timeoutOnlyKey, only)
-}
-
-func TimeoutOnlyFromContext(ctx context.Context) bool {
-	if val, ok := ctx.Value(timeoutOnlyKey).(bool); ok {
-		return val
-	}
-	return false
-}
-
-func ContextWithAllowedNetwork(ctx context.Context, network net.Network) context.Context {
-	return context.WithValue(ctx, allowedNetworkKey, network)
-}
-
-func AllowedNetworkFromContext(ctx context.Context) net.Network {
-	if val, ok := ctx.Value(allowedNetworkKey).(net.Network); ok {
-		return val
-	}
-	return net.Network_Unknown
 }

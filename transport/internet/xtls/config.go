@@ -1,22 +1,23 @@
-package tls
+package xtls
 
 import (
 	"crypto/hmac"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"strings"
 	"sync"
 	"time"
 
+	xtls "github.com/xtls/go"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/ocsp"
 	"github.com/xtls/xray-core/common/platform/filesystem"
 	"github.com/xtls/xray-core/common/protocol/tls/cert"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/tls"
 )
 
-var globalSessionCache = tls.NewLRUClientSessionCache(128)
+var globalSessionCache = xtls.NewLRUClientSessionCache(128)
 
 // ParseCertificate converts a cert.Certificate to Certificate.
 func ParseCertificate(c *cert.Certificate) *Certificate {
@@ -41,13 +42,13 @@ func (c *Config) loadSelfCertPool() (*x509.CertPool, error) {
 }
 
 // BuildCertificates builds a list of TLS certificates from proto definition.
-func (c *Config) BuildCertificates() []*tls.Certificate {
-	certs := make([]*tls.Certificate, 0, len(c.Certificate))
+func (c *Config) BuildCertificates() []*xtls.Certificate {
+	certs := make([]*xtls.Certificate, 0, len(c.Certificate))
 	for _, entry := range c.Certificate {
 		if entry.Usage != Certificate_ENCIPHERMENT {
 			continue
 		}
-		keyPair, err := tls.X509KeyPair(entry.Certificate, entry.Key)
+		keyPair, err := xtls.X509KeyPair(entry.Certificate, entry.Key)
 		if err != nil {
 			newError("ignoring invalid X509 key pair").Base(err).AtWarning().WriteToLog()
 			continue
@@ -60,14 +61,14 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 		certs = append(certs, &keyPair)
 		if !entry.OneTimeLoading {
 			var isOcspstapling bool
-			hotReloadCertInterval := uint64(3600)
+			hotReloadInterval := uint64(3600)
 			if entry.OcspStapling != 0 {
-				hotReloadCertInterval = entry.OcspStapling
+				hotReloadInterval = entry.OcspStapling
 				isOcspstapling = true
 			}
 			index := len(certs) - 1
-			go func(entry *Certificate, cert *tls.Certificate, index int) {
-				t := time.NewTicker(time.Duration(hotReloadCertInterval) * time.Second)
+			go func(entry *Certificate, cert *xtls.Certificate, index int) {
+				t := time.NewTicker(time.Duration(hotReloadInterval) * time.Second)
 				for {
 					if entry.CertificatePath != "" && entry.KeyPath != "" {
 						newCert, err := filesystem.ReadFile(entry.CertificatePath)
@@ -83,7 +84,7 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 							continue
 						}
 						if string(newCert) != string(entry.Certificate) && string(newKey) != string(entry.Key) {
-							newKeyPair, err := tls.X509KeyPair(newCert, newKey)
+							newKeyPair, err := xtls.X509KeyPair(newCert, newKey)
 							if err != nil {
 								newError("ignoring invalid X509 key pair").Base(err).AtError().WriteToLog()
 								<-t.C
@@ -113,7 +114,7 @@ func (c *Config) BuildCertificates() []*tls.Certificate {
 	return certs
 }
 
-func isCertificateExpired(c *tls.Certificate) bool {
+func isCertificateExpired(c *xtls.Certificate) bool {
 	if c.Leaf == nil && len(c.Certificate) > 0 {
 		if pc, err := x509.ParseCertificate(c.Certificate[0]); err == nil {
 			c.Leaf = pc
@@ -121,10 +122,10 @@ func isCertificateExpired(c *tls.Certificate) bool {
 	}
 
 	// If leaf is not there, the certificate is probably not used yet. We trust user to provide a valid certificate.
-	return c.Leaf != nil && c.Leaf.NotAfter.Before(time.Now().Add(time.Minute*2))
+	return c.Leaf != nil && c.Leaf.NotAfter.Before(time.Now().Add(-time.Minute))
 }
 
-func issueCertificate(rawCA *Certificate, domain string) (*tls.Certificate, error) {
+func issueCertificate(rawCA *Certificate, domain string) (*xtls.Certificate, error) {
 	parent, err := cert.ParseCertificate(rawCA.Certificate, rawCA.Key)
 	if err != nil {
 		return nil, newError("failed to parse raw certificate").Base(err)
@@ -134,7 +135,7 @@ func issueCertificate(rawCA *Certificate, domain string) (*tls.Certificate, erro
 		return nil, newError("failed to generate new certificate for ", domain).Base(err)
 	}
 	newCertPEM, newKeyPEM := newCert.ToPEM()
-	cert, err := tls.X509KeyPair(newCertPEM, newKeyPEM)
+	cert, err := xtls.X509KeyPair(newCertPEM, newKeyPEM)
 	return &cert, err
 }
 
@@ -148,10 +149,10 @@ func (c *Config) getCustomCA() []*Certificate {
 	return certs
 }
 
-func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func getGetCertificateFunc(c *xtls.Config, ca []*Certificate) func(hello *xtls.ClientHelloInfo) (*xtls.Certificate, error) {
 	var access sync.RWMutex
 
-	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *xtls.ClientHelloInfo) (*xtls.Certificate, error) {
 		domain := hello.ServerName
 		certExpired := false
 
@@ -167,15 +168,12 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 		}
 
 		if certExpired {
-			newCerts := make([]tls.Certificate, 0, len(c.Certificates))
+			newCerts := make([]xtls.Certificate, 0, len(c.Certificates))
 
 			access.Lock()
 			for _, certificate := range c.Certificates {
 				if !isCertificateExpired(&certificate) {
 					newCerts = append(newCerts, certificate)
-				} else if certificate.Leaf != nil {
-					expTime := certificate.Leaf.NotAfter.Format(time.RFC3339)
-					newError("old certificate for ", domain, " (expire on ", expTime, ") discarded").AtInfo().WriteToLog()
 				}
 			}
 
@@ -183,7 +181,7 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 			access.Unlock()
 		}
 
-		var issuedCertificate *tls.Certificate
+		var issuedCertificate *xtls.Certificate
 
 		// Create a new certificate from existing CA if possible
 		for _, rawCert := range ca {
@@ -192,14 +190,6 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 				if err != nil {
 					newError("failed to issue new certificate for ", domain).Base(err).WriteToLog()
 					continue
-				}
-				parsed, err := x509.ParseCertificate(newCert.Certificate[0])
-				if err == nil {
-					newCert.Leaf = parsed
-					expTime := parsed.NotAfter.Format(time.RFC3339)
-					newError("new certificate for ", domain, " (expire on ", expTime, ") issued").AtInfo().WriteToLog()
-				} else {
-					newError("failed to parse new certificate for ", domain).Base(err).WriteToLog()
 				}
 
 				access.Lock()
@@ -222,8 +212,8 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 	}
 }
 
-func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+func getNewGetCertificateFunc(certs []*xtls.Certificate, rejectUnknownSNI bool) func(hello *xtls.ClientHelloInfo) (*xtls.Certificate, error) {
+	return func(hello *xtls.ClientHelloInfo) (*xtls.Certificate, error) {
 		if len(certs) == 0 {
 			return nil, errNoCertificates
 		}
@@ -258,7 +248,7 @@ func (c *Config) parseServerName() string {
 
 func (c *Config) verifyPeerCert(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	if c.PinnedPeerCertificateChainSha256 != nil {
-		hashValue := GenerateCertChainHash(rawCerts)
+		hashValue := tls.GenerateCertChainHash(rawCerts)
 		for _, v := range c.PinnedPeerCertificateChainSha256 {
 			if hmac.Equal(hashValue, v) {
 				return nil
@@ -266,32 +256,18 @@ func (c *Config) verifyPeerCert(rawCerts [][]byte, verifiedChains [][]*x509.Cert
 		}
 		return newError("peer cert is unrecognized: ", base64.StdEncoding.EncodeToString(hashValue))
 	}
-
-	if c.PinnedPeerCertificatePublicKeySha256 != nil {
-		for _, v := range verifiedChains {
-			for _, cert := range v {
-				publicHash := GenerateCertPublicKeyHash(cert)
-				for _, c := range c.PinnedPeerCertificatePublicKeySha256 {
-					if hmac.Equal(publicHash, c) {
-						return nil
-					}
-				}
-			}
-		}
-		return newError("peer public key is unrecognized.")
-	}
 	return nil
 }
 
-// GetTLSConfig converts this Config into tls.Config.
-func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
+// GetXTLSConfig converts this Config into xtls.Config.
+func (c *Config) GetXTLSConfig(opts ...Option) *xtls.Config {
 	root, err := c.getCertPool()
 	if err != nil {
 		newError("failed to load system root certificate").AtError().Base(err).WriteToLog()
 	}
 
 	if c == nil {
-		return &tls.Config{
+		return &xtls.Config{
 			ClientSessionCache:     globalSessionCache,
 			RootCAs:                root,
 			InsecureSkipVerify:     false,
@@ -300,7 +276,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 		}
 	}
 
-	config := &tls.Config{
+	config := &xtls.Config{
 		ClientSessionCache:     globalSessionCache,
 		RootCAs:                root,
 		InsecureSkipVerify:     c.AllowInsecure,
@@ -330,29 +306,29 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 
 	switch c.MinVersion {
 	case "1.0":
-		config.MinVersion = tls.VersionTLS10
+		config.MinVersion = xtls.VersionTLS10
 	case "1.1":
-		config.MinVersion = tls.VersionTLS11
+		config.MinVersion = xtls.VersionTLS11
 	case "1.2":
-		config.MinVersion = tls.VersionTLS12
+		config.MinVersion = xtls.VersionTLS12
 	case "1.3":
-		config.MinVersion = tls.VersionTLS13
+		config.MinVersion = xtls.VersionTLS13
 	}
 
 	switch c.MaxVersion {
 	case "1.0":
-		config.MaxVersion = tls.VersionTLS10
+		config.MaxVersion = xtls.VersionTLS10
 	case "1.1":
-		config.MaxVersion = tls.VersionTLS11
+		config.MaxVersion = xtls.VersionTLS11
 	case "1.2":
-		config.MaxVersion = tls.VersionTLS12
+		config.MaxVersion = xtls.VersionTLS12
 	case "1.3":
-		config.MaxVersion = tls.VersionTLS13
+		config.MaxVersion = xtls.VersionTLS13
 	}
 
 	if len(c.CipherSuites) > 0 {
 		id := make(map[string]uint16)
-		for _, s := range tls.CipherSuites() {
+		for _, s := range xtls.CipherSuites() {
 			id[s.Name] = s.ID
 		}
 		for _, n := range strings.Split(c.CipherSuites, ":") {
@@ -367,21 +343,21 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	return config
 }
 
-// Option for building TLS config.
-type Option func(*tls.Config)
+// Option for building XTLS config.
+type Option func(*xtls.Config)
 
-// WithDestination sets the server name in TLS config.
+// WithDestination sets the server name in XTLS config.
 func WithDestination(dest net.Destination) Option {
-	return func(config *tls.Config) {
+	return func(config *xtls.Config) {
 		if dest.Address.Family().IsDomain() && config.ServerName == "" {
 			config.ServerName = dest.Address.Domain()
 		}
 	}
 }
 
-// WithNextProto sets the ALPN values in TLS config.
+// WithNextProto sets the ALPN values in XTLS config.
 func WithNextProto(protocol ...string) Option {
-	return func(config *tls.Config) {
+	return func(config *xtls.Config) {
 		if len(config.NextProtos) == 0 {
 			config.NextProtos = protocol
 		}

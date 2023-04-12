@@ -44,7 +44,7 @@ func TestSessionManagerClose(t *testing.T) {
 	if m.CloseIfNoSession() {
 		t.Error("able to close")
 	}
-	m.Remove(false, s.ID)
+	m.Remove(s.ID)
 	if !m.CloseIfNoSession() {
 		t.Error("not able to close")
 	}
