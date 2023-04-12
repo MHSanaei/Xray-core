@@ -2,7 +2,6 @@ package tls
 
 import (
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 )
@@ -34,9 +33,4 @@ func GenerateCertChainHash(rawCerts [][]byte) []byte {
 		}
 	}
 	return hashValue
-}
-
-func GenerateCertPublicKeyHash(cert *x509.Certificate) []byte {
-	out := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-	return out[:]
 }
