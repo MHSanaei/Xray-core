@@ -38,20 +38,23 @@ jobs:
           max_attempts: 60
           command: |
             [ -d 'resources' ] || mkdir resources
-            LIST=('geoip geoip geoip' 'domain-list-community dlc geosite')
+            LIST=('Loyalsoldier v2ray-rules-dat geoip geoip sha256sum' 'Loyalsoldier v2ray-rules-dat geosite geosite sha256sum' 'MasterKia iran-hosted-domains iran iran sha256')
             for i in "${LIST[@]}"
             do
-              INFO=($(echo $i | awk 'BEGIN{FS=" ";OFS=" "} {print $1,$2,$3}'))
-              FILE_NAME="${INFO[2]}.dat"
+              INFO=($(echo $i | awk 'BEGIN{FS=" ";OFS=" "} {print $1,$2,$3,$4,$5}'))
+              REPO_NAME="${INFO[0]}/${INFO[1]}"
+              OLD_FILE_NAME="${INFO[2]}.dat"
+              NEW_FILE_NAME="${INFO[3]}.dat"
+              SHA256_SUFFIX="${INFO[4]}"
               echo -e "Verifying HASH key..."
-              HASH="$(curl -sL "https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat.sha256sum" | awk -F ' ' '{print $1}')"
-              if [ -s "./resources/${FILE_NAME}" ] && [ "$(sha256sum "./resources/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ]; then
+              HASH="$(curl -sL "https://github.com/${REPO_NAME}/releases/latest/download/${OLD_FILE_NAME}.${SHA256_SUFFIX}" | awk -F ' ' '{print $1}')"
+              if [ -s "./resources/${NEW_FILE_NAME}" ] && [ "$(sha256sum "./resources/${NEW_FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ]; then
                   continue
               else
-                  echo -e "Downloading https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat..."
-                  curl -L "https://raw.githubusercontent.com/v2fly/${INFO[0]}/release/${INFO[1]}.dat" -o ./resources/${FILE_NAME}
+                  echo -e "Downloading https://github.com/${REPO_NAME}/releases/latest/download/${OLD_FILE_NAME}..."
+                  curl -L "https://github.com/${REPO_NAME}/releases/latest/download/${OLD_FILE_NAME}" -o ./resources/${NEW_FILE_NAME}
                   echo -e "Verifying HASH key..."
-                  [ "$(sha256sum "./resources/${FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ] || { echo -e "The HASH key of ${FILE_NAME} does not match cloud one."; exit 1; }
+                  [ "$(sha256sum "./resources/${NEW_FILE_NAME}" | awk -F ' ' '{print $1}')" == "${HASH}" ] || { echo -e "The HASH key of ${NEW_FILE_NAME} does not match cloud one."; exit 1; }
                   echo "unhit=true" >> $GITHUB_OUTPUT
               fi
             done
@@ -160,7 +163,7 @@ jobs:
       - name: Checkout codebase
         uses: actions/checkout@v3
 
-      - name: Show workflow information 
+      - name: Show workflow information
         run: |
           export _NAME=$(jq ".[\"$GOOS-$GOARCH$GOARM$GOMIPS\"].friendlyName" -r < .github/build/friendly-filenames.json)
           echo "GOOS: $GOOS, GOARCH: $GOARCH, GOARM: $GOARM, GOMIPS: $GOMIPS, RELEASE_NAME: $_NAME"
@@ -169,12 +172,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
+          go-version: "1.20"
           check-latest: true
 
       - name: Get project dependencies
         run: go mod download
-      
+
       - name: Replace Custom to Commit ID
         if: github.event_name != 'release'
         run: |
@@ -184,17 +187,17 @@ jobs:
             ID=$(git rev-parse --short ${{ github.event.pull_request.head.sha }})
           fi
           sed -i '/build/ s/Custom/'$ID'/' ./core/core.go
- 
+
       - name: Build Xray
         run: |
           mkdir -p build_assets
           go build -v -o build_assets/xray -trimpath -ldflags "-s -w -buildid=" ./main
 
-      - name: Build background Xray on Windows 
+      - name: Build background Xray on Windows
         if: matrix.goos == 'windows'
         run: |
           go build -v -o build_assets/wxray.exe -trimpath -ldflags "-s -w -H windowsgui -buildid=" ./main
-    
+
       - name: Build Mips softfloat Xray
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
