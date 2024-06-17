@@ -23,17 +23,14 @@ ADDITION = go build -o w$(NAME).exe -trimpath -ldflags "-H windowsgui $(LDFLAGS)
 else
 OUTPUT = $(NAME)
 endif
-ifeq ($(shell echo "$(GOARCH)" | grep -Pq "(mips|mipsle)" && echo true),true) # 
+ifeq ($(shell echo "$(GOARCH)" | grep -Eq "(mips|mipsle)" && echo true),true) # 
 ADDITION = GOMIPS=softfloat go build -o $(NAME)_softfloat -trimpath -ldflags "$(LDFLAGS)" -v $(MAIN)
 endif
-.PHONY: clean
+.PHONY: clean build
 
 build:
 	go build -o $(OUTPUT) $(PARAMS) $(MAIN)
 	$(ADDITION)
-
-install:
-	go build -o $(PREFIX)/bin/$(OUTPUT) $(PARAMS) $(MAIN)
 
 clean:
 	go clean -v -i $(PWD)

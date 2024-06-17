@@ -24,8 +24,10 @@ type ConnRF struct {
 func (c *ConnRF) Read(b []byte) (int, error) {
 	if c.First {
 		c.First = false
-		// TODO The bufio usage here is unreliable
-		resp, err := http.ReadResponse(bufio.NewReader(c.Conn), c.Req) // nolint:bodyclose
+		// create reader capped to size of `b`, so it can be fully drained into
+		// `b` later with a single Read call
+		reader := bufio.NewReaderSize(c.Conn, len(b))
+		resp, err := http.ReadResponse(reader, c.Req) // nolint:bodyclose
 		if err != nil {
 			return 0, err
 		}
@@ -34,6 +36,8 @@ func (c *ConnRF) Read(b []byte) (int, error) {
 			strings.ToLower(resp.Header.Get("Connection")) != "upgrade" {
 			return 0, newError("unrecognized reply")
 		}
+		// drain remaining bufreader
+		return reader.Read(b[:reader.Buffered()])
 	}
 	return c.Conn.Read(b)
 }
@@ -74,9 +78,9 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 		Header: make(http.Header),
 	}
 	for key, value := range transportConfiguration.Header {
-		req.Header.Add(key, value)
+		AddHeader(req.Header, key, value)
 	}
-	req.Header.Set("Connection", "upgrade")
+	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
 
 	err = req.Write(conn)
@@ -100,7 +104,14 @@ func dialhttpUpgrade(ctx context.Context, dest net.Destination, streamSettings *
 	return connRF, nil
 }
 
-func dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
+//http.Header.Add() will convert headers to MIME header format.
+//Some people don't like this because they want to send "Web*S*ocket".
+//So we add a simple function to replace that method.
+func AddHeader(header http.Header, key, value string) {
+	header[key] = append(header[key], value)
+}
+
+func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (stat.Connection, error) {
 	newError("creating connection to ", dest).WriteToLog(session.ExportIDToError(ctx))
 
 	conn, err := dialhttpUpgrade(ctx, dest, streamSettings)
@@ -111,5 +122,5 @@ func dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 }
 
 func init() {
-	common.Must(internet.RegisterTransportDialer(protocolName, dial))
+	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
 }

@@ -62,7 +62,7 @@ func (s *server) Handle(conn net.Conn) (stat.Connection, error) {
 		ProtoMinor: 1,
 		Header:     http.Header{},
 	}
-	resp.Header.Set("Connection", "upgrade")
+	resp.Header.Set("Connection", "Upgrade")
 	resp.Header.Set("Upgrade", "websocket")
 	err = resp.Write(conn)
 	if err != nil {
@@ -78,12 +78,8 @@ func (s *server) Handle(conn net.Conn) (stat.Connection, error) {
 			Port: int(0),
 		}
 	}
-	if remoteAddr == nil {
-		return nil, newError("remoteAddr is nil")
-	}
 
-	conn = newConnection(conn, remoteAddr)
-	return stat.Connection(conn), nil
+	return stat.Connection(newConnection(conn, remoteAddr)), nil
 }
 
 func (s *server) keepAccepting() {
@@ -101,7 +97,7 @@ func (s *server) keepAccepting() {
 	}
 }
 
-func listenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
+func ListenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
 	transportConfiguration := streamSettings.ProtocolSettings.(*Config)
 	if transportConfiguration != nil {
 		if streamSettings.SocketSettings == nil {
@@ -151,5 +147,5 @@ func listenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, 
 }
 
 func init() {
-	common.Must(internet.RegisterTransportListener(protocolName, listenHTTPUpgrade))
+	common.Must(internet.RegisterTransportListener(protocolName, ListenHTTPUpgrade))
 }
