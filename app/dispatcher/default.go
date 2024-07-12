@@ -4,14 +4,15 @@ package dispatcher
 
 import (
 	"context"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
@@ -28,6 +29,7 @@ import (
 )
 
 var errSniffingTimeout = errors.New("timeout on sniffing")
+var restrictedIPs string
 
 type cachedReader struct {
 	sync.Mutex
@@ -99,6 +101,8 @@ type DefaultDispatcher struct {
 }
 
 func init() {
+	ctx := context.Background()
+	initRestrictedIPs(ctx)
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
 		d := new(DefaultDispatcher)
 		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, dc dns.Client) error {
@@ -150,6 +154,8 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		Reader: uplinkReader,
 		Writer: downlinkWriter,
 	}
+	// check and drop Restricted Connections
+	dropRestrictedConnections(ctx, outboundLink, inboundLink)
 
 	sessionInbound := session.InboundFromContext(ctx)
 	var user *protocol.MemoryUser
@@ -181,7 +187,71 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 
 	return inboundLink, outboundLink
 }
+func getOsArgValue(s []string, flags ...string) string {
+	for i, v := range s {
+		for _, flagVal := range flags {
+			if v == flagVal {
+				return s[i+1]
+			}
+		}
+	}
 
+	return ""
+}
+func contains(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+	return false
+}
+func initRestrictedIPs(ctx context.Context) {
+	intvalSecond := 10 * time.Second
+	ticker := time.NewTicker(intvalSecond)
+	quit := make(chan struct{})
+	restrictedIPsPath := getOsArgValue(os.Args, "-restrictedIPsPath", "-rip")
+	if restrictedIPsPath == "" {
+		return
+	}
+	go func() {
+		intvalSecond = 30 * time.Second
+		for {
+			select {
+			case <-ticker.C:
+				restrictedIPsByte, err := os.ReadFile(restrictedIPsPath)
+				if err != nil {
+					errors.LogInfo(ctx, "Error reading restrictedIPs:", err)
+				} else {
+					restrictedIPs = string(restrictedIPsByte)
+					errors.LogInfo(ctx, "getting restrictedIPs:", restrictedIPs)
+				}
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+func dropRestrictedConnections(ctx context.Context, outboundLink *transport.Link, inboundLink *transport.Link) {
+	if restrictedIPs == "" {
+		return
+	}
+	// Drop Restricted Connections
+	sessionInbounds := session.InboundFromContext(ctx)
+	userIP := sessionInbounds.Source.Address.String()
+	IPs := strings.Split(string(restrictedIPs), ",")
+
+	if contains(IPs, userIP) {
+		errors.LogInfo(ctx, "IP Limited: ", userIP)
+		common.Close(outboundLink.Writer)
+		common.Close(inboundLink.Writer)
+		common.Interrupt(outboundLink.Reader)
+		common.Interrupt(inboundLink.Reader)
+
+	}
+
+}
 func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResult, request session.SniffingRequest, destination net.Destination) bool {
 	domain := result.Domain()
 	if domain == "" {
