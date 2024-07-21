@@ -41,6 +41,10 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		return &BrowserDialerClient{}
 	}
 
+	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
+	isH2 := tlsConfig != nil && !(len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "http/1.1")
+	isH3 := tlsConfig != nil && (len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "h3")
+
 	globalDialerAccess.Lock()
 	defer globalDialerAccess.Unlock()
 
@@ -48,13 +52,12 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 		globalDialerMap = make(map[dialerConf]DialerClient)
 	}
 
+	if isH3 {
+		dest.Network = net.Network_UDP
+	}
 	if client, found := globalDialerMap[dialerConf{dest, streamSettings}]; found {
 		return client
 	}
-
-	tlsConfig := tls.ConfigFromStreamSettings(streamSettings)
-	isH2 := tlsConfig != nil && !(len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "http/1.1")
-	isH3 := tlsConfig != nil && (len(tlsConfig.NextProtocol) == 1 && tlsConfig.NextProtocol[0] == "h3")
 
 	var gotlsConfig *gotls.Config
 
@@ -86,16 +89,8 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 	var uploadTransport http.RoundTripper
 
 	if isH3 {
-		dest.Network = net.Network_UDP
-		quicConfig := &quic.Config{
-			HandshakeIdleTimeout: 10 * time.Second,
-			MaxIdleTimeout:       90 * time.Second,
-			KeepAlivePeriod:      3 * time.Second,
-			Allow0RTT:            true,
-		}
 		roundTripper := &http3.RoundTripper{
 			TLSClientConfig: gotlsConfig,
-			QUICConfig:      quicConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 				conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
 				if err != nil {
