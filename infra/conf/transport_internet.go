@@ -229,8 +229,10 @@ type SplitHTTPConfig struct {
 	Host                 string            `json:"host"`
 	Path                 string            `json:"path"`
 	Headers              map[string]string `json:"headers"`
-	MaxConcurrentUploads int32             `json:"maxConcurrentUploads"`
-	MaxUploadSize        int32             `json:"maxUploadSize"`
+	MaxConcurrentUploads Int32Range        `json:"maxConcurrentUploads"`
+	MaxUploadSize        Int32Range        `json:"maxUploadSize"`
+	MinUploadIntervalMs  Int32Range        `json:"minUploadIntervalMs"`
+	NoSSEHeader          bool              `json:"noSSEHeader"`
 }
 
 // Build implements Buildable.
@@ -244,11 +246,22 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		c.Host = c.Headers["Host"]
 	}
 	config := &splithttp.Config{
-		Path:                 c.Path,
-		Host:                 c.Host,
-		Header:               c.Headers,
-		MaxConcurrentUploads: c.MaxConcurrentUploads,
-		MaxUploadSize:        c.MaxUploadSize,
+		Path:   c.Path,
+		Host:   c.Host,
+		Header: c.Headers,
+		MaxConcurrentUploads: &splithttp.RandRangeConfig{
+			From: c.MaxConcurrentUploads.From,
+			To:   c.MaxConcurrentUploads.To,
+		},
+		MaxUploadSize: &splithttp.RandRangeConfig{
+			From: c.MaxUploadSize.From,
+			To:   c.MaxUploadSize.To,
+		},
+		MinUploadIntervalMs: &splithttp.RandRangeConfig{
+			From: c.MinUploadIntervalMs.From,
+			To:   c.MinUploadIntervalMs.To,
+		},
+		NoSSEHeader: c.NoSSEHeader,
 	}
 	return config, nil
 }
@@ -372,6 +385,7 @@ type TLSCertConfig struct {
 	Usage          string   `json:"usage"`
 	OcspStapling   uint64   `json:"ocspStapling"`
 	OneTimeLoading bool     `json:"oneTimeLoading"`
+	BuildChain     bool     `json:"buildChain"`
 }
 
 // Build implements Buildable.
@@ -410,6 +424,7 @@ func (c *TLSCertConfig) Build() (*tls.Certificate, error) {
 		certificate.OneTimeLoading = c.OneTimeLoading
 	}
 	certificate.OcspStapling = c.OcspStapling
+	certificate.BuildChain = c.BuildChain
 
 	return certificate, nil
 }

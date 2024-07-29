@@ -26,6 +26,7 @@ import (
 )
 
 type requestHandler struct {
+	config    *Config
 	host      string
 	path      string
 	ln        *Listener
@@ -75,7 +76,7 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 	}
 
 	s := &httpSession{
-		uploadQueue:      NewUploadQueue(int(2 * h.ln.config.GetNormalizedMaxConcurrentUploads())),
+		uploadQueue:      NewUploadQueue(int(h.ln.config.GetNormalizedMaxConcurrentUploads(true).To)),
 		isFullyConnected: done.New(),
 	}
 
@@ -122,6 +123,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	}
 
 	currentSession := h.upsertSession(sessionId)
+	maxUploadSize := int(h.ln.config.GetNormalizedMaxUploadSize(true).To)
 
 	if request.Method == "POST" {
 		seq := ""
@@ -136,6 +138,13 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 
 		payload, err := io.ReadAll(request.Body)
+
+		if len(payload) > maxUploadSize {
+			errors.LogInfo(context.Background(), "Too large upload. maxUploadSize is set to", maxUploadSize, "but request had size", len(payload), ". Adjust maxUploadSize on the server to be at least as large as client.")
+			writer.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+
 		if err != nil {
 			errors.LogInfoInner(context.Background(), err, "failed to upload")
 			writer.WriteHeader(http.StatusInternalServerError)
@@ -174,8 +183,10 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 		// magic header instructs nginx + apache to not buffer response body
 		writer.Header().Set("X-Accel-Buffering", "no")
-		// magic header to make the HTTP middle box consider this as SSE to disable buffer
-		writer.Header().Set("Content-Type", "text/event-stream")
+		if !h.config.NoSSEHeader {
+			// magic header to make the HTTP middle box consider this as SSE to disable buffer
+			writer.Header().Set("Content-Type", "text/event-stream")
+		}
 
 		writer.WriteHeader(http.StatusOK)
 		// send a chunk immediately to enable CDN streaming.
@@ -259,8 +270,9 @@ func ListenSH(ctx context.Context, address net.Address, port net.Port, streamSet
 	var err error
 	var localAddr = gonet.TCPAddr{}
 	handler := &requestHandler{
+		config:    shSettings,
 		host:      shSettings.Host,
-		path:      shSettings.GetNormalizedPath(),
+		path:      shSettings.GetNormalizedPath("", false),
 		ln:        l,
 		sessionMu: &sync.Mutex{},
 		sessions:  sync.Map{},
@@ -314,14 +326,6 @@ func ListenSH(ctx context.Context, address net.Address, port net.Port, streamSet
 			return nil, errors.New("failed to listen TCP(for SH) on ", address, ":", port).Base(err)
 		}
 		errors.LogInfo(ctx, "listening TCP(for SH) on ", address, ":", port)
-
-		// h2cHandler can handle both plaintext HTTP/1.1 and h2c
-		h2cHandler := h2c.NewHandler(handler, &http2.Server{})
-		l.server = http.Server{
-			Handler:           h2cHandler,
-			ReadHeaderTimeout: time.Second * 4,
-			MaxHeaderBytes:    8192,
-		}
 	}
 
 	// tcp/unix (h1/h2)
@@ -332,7 +336,14 @@ func ListenSH(ctx context.Context, address net.Address, port net.Port, streamSet
 			}
 		}
 
+		// h2cHandler can handle both plaintext HTTP/1.1 and h2c
+		h2cHandler := h2c.NewHandler(handler, &http2.Server{})
 		l.listener = listener
+		l.server = http.Server{
+			Handler:           h2cHandler,
+			ReadHeaderTimeout: time.Second * 4,
+			MaxHeaderBytes:    8192,
+		}
 
 		go func() {
 			if err := l.server.Serve(l.listener); err != nil {
